@@ -96,7 +96,7 @@ function setupMiddleware() {
 
 		// Serve static files from the frontend build
 		app.use(express.static(path.join(__dirname, 'public')));
-
+		app.use('/fast', express.static(path.join(__dirname, 'public')));
 		// Request logging middleware
 		app.use((req, res, next) => {
 			console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -156,7 +156,10 @@ function setupRoutes() {
 				});
 			} else {
 				// SPA fallback - serve index.html for all non-API routes
-				res.sendFile(path.join(__dirname, 'public', 'index.html'));
+				// res.sendFile(path.join(__dirname, 'public', 'index.html'));
+				if (req.path.startsWith('/fast/') || !req.path.startsWith('/api/')) {
+					res.sendFile(path.join(__dirname, 'public', 'index.html'));
+				}
 			}
 		});
 
