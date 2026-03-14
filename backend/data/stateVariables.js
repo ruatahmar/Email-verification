@@ -7,7 +7,7 @@ const uuid = uuidv4(); // unique id of the server to check if the server restart
 const stateVariables = {
 	uuid, // When the uuid changes, will tell the controller that the code has been restarted
 	ping_freq: 10,
-	thread_num: 4,
+	thread_num: 10,
 	mx_domain: MX_DOMAIN,
 	em_domain: EM_DOMAIN,
 };

@@ -19,6 +19,23 @@ const yahooEmailDomains = require('../../data/lists/yahooEmailDomains');
 const MXOrganizationClassifier = require('./utils/mxOrganizationClassifier');
 const MXProcessingProfiles = require('./utils/mxProcessingProfiles');
 
+const _mxCache = new Map();
+const MX_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function getMXRecordsCached(email) {
+	const domain = email.includes('@') ? email.split('@')[1].toLowerCase() : email.toLowerCase();
+	const cached = _mxCache.get(domain);
+	if (cached && cached.expiresAt > Date.now()) return cached.records;
+	const records = await getMXRecords(email);
+	_mxCache.set(domain, { records, expiresAt: Date.now() + MX_CACHE_TTL_MS });
+	if (_mxCache.size > 2000) {
+		const now = Date.now();
+		for (const [k, v] of _mxCache) {
+			if (v.expiresAt <= now) _mxCache.delete(k);
+		}
+	}
+	return records;
+}
 /**
  * This class is used to create a verifier instance
  */
@@ -31,12 +48,12 @@ class VerifierInstance {
 		workerData?.index === 0
 			? winston.loggers.get(loggerTypes.verifier0)
 			: workerData?.index === 1
-			? winston.loggers.get(loggerTypes.verifier1)
-			: workerData?.index === 2
-			? winston.loggers.get(loggerTypes.verifier2)
-			: workerData?.index === 3
-			? winston.loggers.get(loggerTypes.verifier3)
-			: winston.loggers.get(loggerTypes.verifier);
+				? winston.loggers.get(loggerTypes.verifier1)
+				: workerData?.index === 2
+					? winston.loggers.get(loggerTypes.verifier2)
+					: workerData?.index === 3
+						? winston.loggers.get(loggerTypes.verifier3)
+						: winston.loggers.get(loggerTypes.verifier);
 	/** @private {import("worker_threads").MessagePort | null} Message port to connect to parent */
 	parentPort;
 
@@ -187,7 +204,7 @@ class VerifierInstance {
 						// make mx check
 						if (!quickCheckResult.disposable) {
 							// -> get the mx records
-							const mx_records = await getMXRecords(email);
+							const mx_records = await getMXRecordsCached(email);
 							quickCheckResult.mx = mx_records.map(res => ({
 								Host: res.exchange,
 								Pref: res.priority,
@@ -307,12 +324,12 @@ class VerifierInstance {
 			recheckRequired.push(...requires_recheck); // add all the values
 
 			// run these organization group verifications with appropriate rate limiting
-			for (const orgGroup of groups) {
+			const processOrgGroup = async (orgGroup) => {
 				try {
 					// Validate organization group
 					if (!orgGroup || !orgGroup.emails || !Array.isArray(orgGroup.emails)) {
 						this.logger.warn('Invalid organization group:', orgGroup);
-						continue;
+						return;
 					}
 
 					// Get processing configuration for this organization
@@ -334,14 +351,14 @@ class VerifierInstance {
 
 					if (emails.length === 0) {
 						this.logger.warn(`No valid emails found in organization group: ${orgGroup.organization}`);
-						continue;
+						return;
 					}
 
 					const mx_records = orgGroup.emails[0]?.mx || [];
 
 					if (!mx_records || mx_records.length === 0) {
 						this.logger.warn(`No MX records found for organization: ${orgGroup.organization}`);
-						continue; // skips the one with no mx record
+						return; // skips the one with no mx record
 					}
 
 					this.logger.debug(
@@ -357,13 +374,13 @@ class VerifierInstance {
 							`Error creating sub groups for ${orgGroup.organization}:`,
 							this.getErrorMessage(error)
 						);
-						continue;
+						return;
 					}
 
 					// -> email sub group is a group of emails of length as per standards
 					if (!emailSubGroup || !Array.isArray(emailSubGroup)) {
 						this.logger.warn(`Invalid email sub group for organization: ${orgGroup.organization}`);
-						continue;
+						return;
 					}
 
 					for (let i = 0; i < emailSubGroup.length; i++) {
@@ -439,16 +456,11 @@ class VerifierInstance {
 											const reachable = calculateReachable(smtp);
 
 											// get gravatar
-											let gravatar;
-											try {
-												gravatar = await checkGravatar(key);
-											} catch (gravatarError) {
-												this.logger.warn(
-													`Error checking gravatar for ${key}:`,
-													this.getErrorMessage(gravatarError)
-												);
-												gravatar = '';
-											}
+											let gravatar = ''; // filled in async
+											checkGravatar(key).then(g => {
+												const ex = finalResult.get(key);
+												if (ex) finalResult.set(key, { ...ex, gravatar: g });
+											}).catch(() => { });
 
 											const errObj = {
 												error: resultObj?.error,
@@ -488,7 +500,9 @@ class VerifierInstance {
 				} catch (orgError) {
 					this.logger.error(`Error processing organization group:`, this.getErrorMessage(orgError));
 				}
+
 			}
+			await Promise.all(groups.map(orgGroup => processOrgGroup(orgGroup)));
 		} catch (error) {
 			this.logger.error(`smtpVerification() error -> ${error?.toString()}`);
 		} finally {
